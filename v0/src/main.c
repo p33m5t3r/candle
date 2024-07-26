@@ -68,6 +68,21 @@ void string_prepend(String* dst, const char* src) {
     dst->data[new_len] = '\0';
 }
 
+String* string_concat(const String* str1, const String* str2) {
+    if (str1 == NULL || str2 == NULL) return NULL;
+    
+    size_t new_length = str1->length + str2->length;
+    String* result = string_new(new_length + 1);  // +1 for null terminator
+    if (result == NULL) return NULL;
+
+    memcpy(result->data, str1->data, str1->length);
+    memcpy(result->data + str1->length, str2->data, str2->length);
+    
+    result->data[new_length] = '\0';
+    result->length = new_length;
+    return result;
+}
+
 char* string_to_chars(const String* str) {
     if (str == NULL || str->data == NULL) {
         return NULL;
@@ -89,6 +104,15 @@ int string_len(const String* str) {
 
 int string_cmp(const String* s1, const String* s2) {
     return strcmp(s1->data, s2->data);
+}
+
+char* strdup_local(const char* s) {
+   size_t len = strlen(s) + 1;
+   char* new_str = malloc(len);
+   if (new_str) {
+       memcpy(new_str, s, len);
+   }
+   return new_str;
 }
 
 // {"foo": [1,2,3], "bar": {"a": 1, "b": 2}}
@@ -160,25 +184,26 @@ static void json_value_free(JsonValue* value) {
 }
 
 static void json_pair_free(JsonPair* head) {
+    if (head == NULL) return;
     if (head->key != NULL)   free(head->key);
-    if (head->value != NULL) free(head->value);
-    if (head->next != NULL)  json_pair_free(head->next);
+    if (head->value != NULL) json_value_free(head->value);
+    json_pair_free(head->next);
     free(head);
 }
 
 static char* json_array_str(JsonArray* arr);
-static char* json_object_str(JsonObject* obj);
+static char* json_object_dumps(JsonObject* obj);
 static char* json_value_str(JsonValue* value) {
-    if (value == NULL) return "NULL";
+    if (value == NULL) return strdup_local("NULL");
     switch (value->type) {
         case J_STR:
-            return value->value.string;
+            return strdup_local(value->value.string);
             break;
         case J_ARR:
             return json_array_str(value->value.arr);
             break;
         default:
-            return json_object_str(value->value.obj);
+            return json_object_dumps(value->value.obj);
             break;
     }
 }
@@ -193,35 +218,23 @@ static char* json_array_str(JsonArray* arr) {
     return string_to_chars(s);
 }
 
-static char* json_object_str(JsonObject* obj) {
-    String* s = string_from("{");
-    JsonPair* pair = obj->head;
-    int count = 0;
-    while (pair != NULL) {
-        if (count != 0) string_append(s, ", ");
-        string_append(s, "\"");
-        string_append(s, pair->key);
-        string_append(s, "\": ");
-        string_append(s, json_value_str(pair->value));
-        pair = pair->next;
-        count++;
-    }
-    string_append(s, "}");
-    return string_to_chars(s);
-}
-
-
 // public api
 JsonObject* json_object_init() {
-    return malloc(sizeof(JsonObject));
+    JsonObject* obj = malloc(sizeof(JsonObject));
+    if (obj) {
+        obj->head = NULL;
+    }
+    return obj;
 }
 JsonObject* json_object_from(const char* str);  // the parser
 
+/* frees the given object, including all nested objects */
 void json_object_free(JsonObject* obj) {
-    if (obj->head != NULL)
-        json_pair_free(obj->head);
+    if (obj == NULL) return;
+    if (obj->head != NULL) json_pair_free(obj->head);
     free(obj);
 }
+
 
 // TODO: json_object_set() to set arbitrary json values (traversal)
 //       fill out the str and maybe int methods for ease of use
@@ -229,8 +242,55 @@ void json_object_free(JsonObject* obj) {
 //       make sure printing works, make the json more complicated, repeat
 //       write a function to wrap creating a JsonArray
 //       put an array in the test object, make sure it works
-void json_object_set(JsonObject* obj, const char* k, const JsonValue* v);
-void json_object_set_str(JsonObject* obj, const char* k, const char* v);
+static JsonPair* json_pair_get_tail(JsonPair* pair) {
+    JsonPair* tail = pair;
+    while (tail->next != NULL) tail = tail->next;
+    return tail;
+}
+
+void json_object_add_pair(JsonObject* obj, JsonPair* pair) {
+    if (obj->head == NULL) {
+        obj->head = pair;
+    } else {
+        JsonPair* tail = json_pair_get_tail(obj->head);
+        tail->next = pair;
+    }
+    pair->next = NULL;
+}
+
+// void json_object_set_kv(JsonObject* obj, char* k, JsonValue* v) {
+//     JsonPair* pair = malloc(sizeof(JsonPair));
+//     pair->key = k;
+//     pair->value = v;
+//     json_object_add_pair(obj, pair);
+// }
+
+void json_object_set_str(JsonObject* obj, const char* k, const char* v) {
+    JsonValue* value = malloc(sizeof(JsonValue));
+    value->type = J_STR;
+    value->value.string = strdup_local(v);
+
+    JsonPair* pair = malloc(sizeof(JsonPair));
+    pair->key = strdup_local(k);
+    pair->value = value;
+    pair->next = NULL;
+
+    json_object_add_pair(obj, pair);
+}
+
+void json_object_set_obj(JsonObject* obj, const char* k, JsonObject* v) {
+    JsonValue* value = malloc(sizeof(JsonValue));
+    value->type = J_OBJ;
+    value->value.obj = v;
+
+    JsonPair* pair = malloc(sizeof(JsonPair));
+    pair->key = strdup_local(k);
+    pair->value = value;
+    pair->next = NULL;
+
+    json_object_add_pair(obj, pair);
+}
+
 void json_object_set_int(JsonObject* obj, const char* k, int v);
 void json_object_set_bool(JsonObject* obj, const char* k, int v);
 void json_object_set_real(JsonObject* obj, const char* k, int v);
@@ -243,7 +303,35 @@ JsonValue* json_object_get(const JsonObject* obj, const char* k);
     int json_object_get_bool(const JsonObject* obj, const char* k);
     Vec* json_object_get_vec(const JsonObject* obj, const char* k);
 
-char* json_object_dumps(JsonObject* obj);
+char* json_object_dumps(JsonObject* obj) {
+    String* s = string_from("{");
+    JsonPair* pair = obj->head;
+    int count = 0;
+    while (pair != NULL) {
+        if (count != 0) string_append(s, ", ");
+        string_append(s, "\"");
+        string_append(s, pair->key);
+        string_append(s, "\": ");
+
+        char* value_str = json_value_str(pair->value);
+        if (pair->value != NULL && pair->value->type == J_STR) {
+            string_append(s, "\"");
+            string_append(s, value_str);
+            string_append(s, "\"");
+        } else {
+            string_append(s, value_str);
+        }
+        free(value_str);
+
+        pair = pair->next;
+        count++;
+    }
+    string_append(s, "}");
+    char* out = string_to_chars(s);
+    string_free(s);
+    return out;
+}
+
 void json_object_dump(JsonObject* obj, char* filename);
 
 char* read_file_to_str(const char* filename) {
@@ -278,6 +366,7 @@ char* read_file_to_str(const char* filename) {
 }
 
 int main() {
+    /*
     const char FILENAME[] = "test.json";
     char* file_contents = read_file_to_str(FILENAME);
     if (file_contents == NULL) {
@@ -285,6 +374,20 @@ int main() {
         return 1;
     }
     printf("%s\n", file_contents);
+    */
+
+    JsonObject* j = json_object_init();
+    JsonObject* k = json_object_init();
+    json_object_set_str(j, "j_k1", "j_v1");
+    json_object_set_str(k, "k_k1", "k_v1");
+    json_object_set_obj(j, "obj_k", k);
+    char* strjson = json_object_dumps(j);
+    printf("%s", strjson);
+
+    free(strjson);
+    json_object_free(j);
+    // json_object_free(k);
+
     return 0;
 }
 
