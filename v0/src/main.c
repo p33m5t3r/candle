@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
 
 // strings
 typedef struct {
@@ -118,7 +119,7 @@ char* strdup_local(const char* s) {
 // {"foo": [1,2,3], "bar": {"a": 1, "b": 2}}
 typedef enum {
     J_OBJ,      // a (linked) list of key value pairs
-    J_ARR,      // a list of values
+    J_ARR,      // a (possibly nested) list of string values or objects
     J_STR,      // we treat everything as a string
 } JsonType;
 
@@ -257,13 +258,6 @@ void json_object_free(JsonObject* obj) {
     free(obj);
 }
 
-
-// TODO: json_object_set() to set arbitrary json values (traversal)
-//       fill out the str and maybe int methods for ease of use
-//       try building a simple hardcoded json object
-//       make sure printing works, make the json more complicated, repeat
-//       write a function to wrap creating a JsonArray
-//       put an array in the test object, make sure it works
 static JsonPair* json_pair_get_tail(JsonPair* pair) {
     JsonPair* tail = pair;
     while (tail->next != NULL) tail = tail->next;
@@ -293,27 +287,77 @@ JsonArray* json_array_init(size_t size) {
     return arr;
 }
 
-/* puts n strings into a JsonArray on obj */
-void json_object_set_arr(JsonObject* obj, const char* k, char** strs, size_t n) {
+JsonValue** json_values_from(JsonType type, void** list, size_t count) {
+    JsonValue** values = malloc(count * sizeof(JsonValue*));
+    if (!values) {
+        fprintf(stderr, "malloc JsonValue** in json_values_from failed\n");
+        return NULL;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        values[i] = malloc(sizeof(JsonValue));
+        if (!values[i]) {
+            fprintf(stderr, "malloc JsonValue in json_values_from failed\n");
+            // Free previously allocated memory
+            for (size_t j = 0; j < i; j++) {
+                free(values[j]);
+            }
+            free(values);
+            return NULL;
+        }
+
+        values[i]->type = type;
+        switch (type) {
+            case J_STR:
+                values[i]->value.string = strdup_local((char*)list[i]);
+                break;
+            case J_OBJ:
+                values[i]->value.obj = (JsonObject*)list[i];
+                break;
+            case J_ARR:
+                fprintf(stderr, "nested arrays not supported yet!");
+                return NULL;
+        }
+    }
+
+    return values;
+}
+
+
+void json_object_set_arr(JsonObject* obj, const char* k, JsonType type,
+                         void** list, size_t n) {
+    JsonValue** values = json_values_from(type, list, n);
     JsonArray* arr = json_array_init(n);
     if (arr == NULL) {
         fprintf(stderr, "malloc JsonArray failed!");
         return;
     }
     for (size_t i = 0; i < n; i++) {
-        arr->values[i].type = J_STR;
-        arr->values[i].value.string = strdup_local(strs[i]);
+        arr->values[i] = *values[i];
+        free(values[i]);    // take ownership
     }
     
     JsonValue* arr_value = malloc(sizeof(JsonValue));
+    if (arr_value == NULL) {
+        fprintf(stderr, "malloc JsonValue failed!");
+        json_array_free(arr);
+        return;
+    }
     arr_value->type = J_ARR;
     arr_value->value.arr = arr;
 
     JsonPair* pair = malloc(sizeof(JsonPair));
+    if (pair == NULL) {
+        fprintf(stderr, "malloc JsonPair failed!");
+        json_value_free(arr_value);
+        return;
+    }
     pair->key = strdup_local(k);
     pair->value = arr_value;
     pair->next = NULL;
     json_object_add_pair(obj, pair);
+
+    free(values);
 }
 
 void json_object_set_str(JsonObject* obj, const char* k, const char* v) {
@@ -342,9 +386,7 @@ void json_object_set_obj(JsonObject* obj, const char* k, JsonObject* v) {
     json_object_add_pair(obj, pair);
 }
 
-void json_object_set_int(JsonObject* obj, const char* k, int v);
-void json_object_set_bool(JsonObject* obj, const char* k, int v);
-void json_object_set_real(JsonObject* obj, const char* k, int v);
+void json_object_set_vec(JsonObject* obj, const char* k, Vec* v);
 
 JsonValue* json_object_get(const JsonObject* obj, const char* k);
     JsonType json_object_get_type(const JsonObject* obj, const char* k);
@@ -416,6 +458,37 @@ char* read_file_to_str(const char* filename) {
     return content;
 }
 
+void test_trivial_json_construction(void) {
+    char* strs[] = {"s1", "string2", "str3"};
+    size_t n_strs = sizeof(strs) / sizeof(strs[0]);
+    JsonObject* o1 = json_object_init();
+    JsonObject* o2 = json_object_init();
+    JsonObject* j = json_object_init();
+    JsonObject* k = json_object_init();
+
+    json_object_set_str(o1, "a", "b");
+    json_object_set_str(o2, "c", "d");
+    JsonObject* objs[] = {o1, o2};
+    size_t n_objs = sizeof(objs) / sizeof(objs[0]);
+    json_object_set_arr(k, "obj_arr", J_OBJ, (void**)objs, n_objs);
+
+    json_object_set_str(j, "j_k1", "j_v1");
+    json_object_set_arr(j, "str_arr", J_STR, (void**)strs, n_strs);
+    json_object_set_str(k, "k_k1", "k_v1");
+    json_object_set_obj(j, "obj_k", k);
+    char* expected = "{\"j_k1\": \"j_v1\", "
+                     "\"str_arr\": [\"s1\", \"string2\", \"str3\"],"
+                     " \"obj_k\": {\"obj_arr\": [{\"a\": \"b\"}, "
+                     "{\"c\": \"d\"}], \"k_k1\": \"k_v1\"}}";
+
+    char* strjson = json_object_dumps(j);
+    assert(!strcmp(strjson, expected) && "error: unexpected json");
+    printf("trivial json construction test passed");
+    free(strjson);
+    json_object_free(j);
+}
+
+// TODO: add native Vec support
 int main() {
     /*
     const char FILENAME[] = "test.json";
@@ -427,22 +500,7 @@ int main() {
     printf("%s\n", file_contents);
     */
 
-    char* strs[] = {"s1", "string2", "str3"};
-    size_t n_strs = sizeof(strs) / sizeof(strs[0]);
-
-    JsonObject* j = json_object_init();
-    JsonObject* k = json_object_init();
-    json_object_set_str(j, "j_k1", "j_v1");
-    json_object_set_arr(j, "str_arr", strs, n_strs);
-    json_object_set_str(k, "k_k1", "k_v1");
-    json_object_set_obj(j, "obj_k", k);
-    char* strjson = json_object_dumps(j);
-    printf("%s", strjson);
-
-    free(strjson);
-    json_object_free(j);
-    // json_object_free(k);
-
+    test_trivial_json_construction();
     return 0;
 }
 
