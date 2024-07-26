@@ -159,14 +159,20 @@ typedef struct {
 
 void json_object_free(JsonObject* obj);
 static void json_value_free(JsonValue* value);
+static void json_value_free_inner(JsonValue* value);
 
 static void json_array_free(JsonArray* arr) {
+    if (arr == NULL) return;
+
     for (size_t i = 0; i < arr->size; i++)
-        json_value_free(arr->values + i);
+        json_value_free_inner(arr->values + i);
+
+    free(arr->values);
     free(arr);
 }
 
-static void json_value_free(JsonValue* value) {
+/* frees the data in `value` but not `value` itself */
+static void json_value_free_inner(JsonValue* value) {
     if (value == NULL) return;
 
     switch (value->type) {
@@ -180,6 +186,12 @@ static void json_value_free(JsonValue* value) {
             json_object_free(value->value.obj);
             break;
     }
+}
+
+/* frees the data in `value` then frees `value` itself */
+static void json_value_free(JsonValue* value) {
+    if (value == NULL) return;
+    json_value_free_inner(value);
     free(value);
 }
 
@@ -212,10 +224,20 @@ static char* json_array_str(JsonArray* arr) {
     String* s = string_from("[");
     for (size_t i = 0; i < arr->size; i++) {
         if (i > 0) string_append(s, ", ");
-        string_append(s, json_value_str(arr->values + i));
+        if (arr->values[i].type == J_STR) {
+            string_append(s, "\"");
+            string_append(s, arr->values[i].value.string);
+            string_append(s, "\"");
+        } else {
+            char* value_str = json_value_str(&arr->values[i]);
+            string_append(s, value_str);
+            free(value_str);
+        }
     }
     string_append(s, "]");
-    return string_to_chars(s);
+    char* result = string_to_chars(s);
+    string_free(s);
+    return result;
 }
 
 // public api
@@ -258,12 +280,41 @@ void json_object_add_pair(JsonObject* obj, JsonPair* pair) {
     pair->next = NULL;
 }
 
-// void json_object_set_kv(JsonObject* obj, char* k, JsonValue* v) {
-//     JsonPair* pair = malloc(sizeof(JsonPair));
-//     pair->key = k;
-//     pair->value = v;
-//     json_object_add_pair(obj, pair);
-// }
+/* initializes an empty JsonArray with space for `size` elements */
+JsonArray* json_array_init(size_t size) {
+    JsonArray* arr = malloc(sizeof(JsonArray));
+    if (arr == NULL) return NULL;
+    arr->values = malloc(size * sizeof(JsonValue));
+    if (arr->values == NULL) {
+        free(arr);
+        return NULL;
+    }
+    arr->size = size;
+    return arr;
+}
+
+/* puts n strings into a JsonArray on obj */
+void json_object_set_arr(JsonObject* obj, const char* k, char** strs, size_t n) {
+    JsonArray* arr = json_array_init(n);
+    if (arr == NULL) {
+        fprintf(stderr, "malloc JsonArray failed!");
+        return;
+    }
+    for (size_t i = 0; i < n; i++) {
+        arr->values[i].type = J_STR;
+        arr->values[i].value.string = strdup_local(strs[i]);
+    }
+    
+    JsonValue* arr_value = malloc(sizeof(JsonValue));
+    arr_value->type = J_ARR;
+    arr_value->value.arr = arr;
+
+    JsonPair* pair = malloc(sizeof(JsonPair));
+    pair->key = strdup_local(k);
+    pair->value = arr_value;
+    pair->next = NULL;
+    json_object_add_pair(obj, pair);
+}
 
 void json_object_set_str(JsonObject* obj, const char* k, const char* v) {
     JsonValue* value = malloc(sizeof(JsonValue));
@@ -376,9 +427,13 @@ int main() {
     printf("%s\n", file_contents);
     */
 
+    char* strs[] = {"s1", "string2", "str3"};
+    size_t n_strs = sizeof(strs) / sizeof(strs[0]);
+
     JsonObject* j = json_object_init();
     JsonObject* k = json_object_init();
     json_object_set_str(j, "j_k1", "j_v1");
+    json_object_set_arr(j, "str_arr", strs, n_strs);
     json_object_set_str(k, "k_k1", "k_v1");
     json_object_set_obj(j, "obj_k", k);
     char* strjson = json_object_dumps(j);
