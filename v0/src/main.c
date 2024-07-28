@@ -3,6 +3,7 @@
 #include <string.h>
 #include <assert.h>
 #include <float.h>
+#include <stdbool.h>
 
 // strings
 typedef struct {
@@ -458,13 +459,38 @@ void json_object_set_vec(JsonObject* obj, const char* k, Vec* v) {
     json_object_add_pair(obj, pair);
 }
 
-JsonValue* json_object_get(const JsonObject* obj, const char* k);
-    JsonType json_object_get_type(const JsonObject* obj, const char* k);
-    char* json_object_get_str(const JsonObject* obj, const char* k);
-    int json_object_get_int(const JsonObject* obj, const char* k);
-    int json_object_get_real(const JsonObject* obj, const char* k);
-    int json_object_get_bool(const JsonObject* obj, const char* k);
-    Vec* json_object_get_vec(const JsonObject* obj, const char* k);
+JsonValue* json_object_get(const JsonObject* obj, const char* k) {
+    if (obj == NULL || obj->head == NULL) return NULL;
+    JsonPair* current = obj->head;
+    while(current != NULL) {
+        if (strcmp(current->key, k) == 0) return current->value;
+        current = current->next;
+    }
+    return NULL;
+}
+
+JsonValue* json_object_get_typecheck(const JsonObject* obj, 
+        const char* k, JsonType t) {
+    JsonValue* val = json_object_get(obj, k);
+    if (val == NULL || val->type != t) return NULL;
+    return val;
+}
+
+/* returns a pointer to the char* data in the json object if its type matches */
+bool json_object_get_str(const JsonObject* obj, const char* k, char** out) {
+    JsonValue* val = json_object_get_typecheck(obj, k, J_STR);
+    if (val == NULL) return false;
+    *out = val->value.string;
+    return true;
+}
+
+/* returns a pointer to the Vec* in the json object if its type matches */
+bool json_object_get_vec(const JsonObject* obj, const char* k, Vec** out) {
+    JsonValue* val = json_object_get_typecheck(obj, k, J_VEC);
+    if (val == NULL) return false;
+    *out = val->value.vec;
+    return true;
+}
 
 char* json_object_dumps(JsonObject* obj) {
     String* s = string_from("{");
@@ -528,7 +554,7 @@ char* read_file_to_str(const char* filename) {
     return content;
 }
 
-void test_trivial_json_construction(void) {
+void test_json_build(void) {
     char* strs[] = {"s1", "string2", "str3"};
     size_t n_strs = sizeof(strs) / sizeof(strs[0]);
     JsonObject* o1 = json_object_init();
@@ -551,14 +577,23 @@ void test_trivial_json_construction(void) {
                      " \"obj_k\": {\"obj_arr\": [{\"a\": \"b\"}, "
                      "{\"c\": \"d\"}], \"k_k1\": \"k_v1\"}}";
 
+    // TODO: obviously make this testing more organized
     char* strjson = json_object_dumps(j);
-    assert(!strcmp(strjson, expected) && "error: unexpected json");
-    printf("trivial json construction test passed");
+    assert(!strcmp(strjson, expected) && "json construction failed");
+    printf("trivial json build OK\n");
     free(strjson);
+
+    char* str_result = NULL;
+    expected = "j_v1";
+    json_object_get_str(j, "j_k1", &str_result);
+    assert(!strcmp(str_result, expected) && "json_get_str failed");
+    printf("json_get_str OK\n");
+
     json_object_free(j);
 }
 
-void test_vec_json_memory(void) {
+void test_json_vec(void) {
+    {   // arbitrary scope to let me re-declare xs later
     float* xs = malloc(3 * sizeof(float));
     xs[0] = 3.14159265359f;
     xs[1] = 2.70f;
@@ -570,7 +605,7 @@ void test_vec_json_memory(void) {
     JsonObject* j = json_object_init();
     json_object_set_vec(j, "vec_k", v);
     char* j_str = json_object_dumps(j);
-    printf("%s", j_str);
+    // printf("%s", j_str);
     free(j_str);
     json_object_free(j);
 
@@ -580,13 +615,32 @@ void test_vec_json_memory(void) {
     j = json_object_init();
     json_object_set_vec(j, "vec_k", v);
     j_str = json_object_dumps(j);
-    printf("%s", j_str);
     free(j_str);
     json_object_free(j);
+    printf("json vec construction OK\n");
+    }
+
+    float* xs = malloc(3 * sizeof(float));
+    xs[0] = 3.14;
+    xs[1] = 2.7;
+    xs[2] = 1.0;
+    Vec* v = vec_from_copy(xs, 3);
+    Vec* out = NULL;
+    JsonObject* j = json_object_init();
+
+    json_object_set_vec(j, "vec", v);
+    json_object_get_vec(j, "vec", &out);
+    char* s = vec_to_str(out);
+    printf("%s", s);
+    free(s);
+
+    json_object_free(j);
+    free(xs);
 }
 
-// TODO: getters
-//       parsing
+
+// TODO: parsing
+//       parse vec as tensor w/ strides given by shape vec
 int main() {
     /*
     const char FILENAME[] = "test.json";
@@ -598,8 +652,8 @@ int main() {
     printf("%s\n", file_contents);
     */
 
-    test_trivial_json_construction();
-    test_vec_json_memory();
+    // test_json_build();
+    test_json_vec();
 
     return 0;
 }
