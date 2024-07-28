@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#include <float.h>
 
 // strings
 typedef struct {
@@ -116,11 +117,68 @@ char* strdup_local(const char* s) {
    return new_str;
 }
 
+typedef struct {
+    float* data;
+    size_t dim;
+} Vec;
+
+Vec* vec_init(size_t dim) {
+    Vec* vec = malloc(sizeof(Vec));
+    if (vec == NULL) return NULL;
+    
+    vec->dim = dim;
+    vec->data = malloc(dim * sizeof(float));
+    return vec;
+}
+
+// copies data
+Vec* vec_from_copy(const float* data, size_t dim) {
+    Vec* v = vec_init(dim);
+    if (v == NULL) return NULL;
+
+    memcpy(v->data, data, dim * sizeof(float)); 
+    return v;
+}
+// makes a vec with a reference to data
+Vec* vec_from_takes(float* data, size_t dim) {
+    Vec* vec = malloc(sizeof(Vec));
+    if (vec == NULL) return NULL;
+    vec->dim = dim;
+    vec->data = data;
+    return vec;
+}
+
+void vec_free(Vec* v) {
+    if (v == NULL) return;
+    if (v->data) free(v->data);
+    free(v);
+}
+
+char* vec_to_str(Vec* v) {
+    if (v == NULL || v->data == NULL) return strdup_local("");
+
+    String* s = string_from("[");
+    char buffer[32];
+
+    for (size_t i = 0; i < v->dim; i++) {
+        if (i > 0) string_append(s, ", ");
+        snprintf(buffer, sizeof(buffer), "%.*g", 
+                 DBL_DECIMAL_DIG, v->data[i]);
+        string_append(s, buffer);
+    }
+    string_append(s, "]");
+    char* result = string_to_chars(s);
+    string_free(s);
+
+    return result;
+}
+
 // {"foo": [1,2,3], "bar": {"a": 1, "b": 2}}
 typedef enum {
     J_OBJ,      // a (linked) list of key value pairs
     J_ARR,      // a (possibly nested) list of string values or objects
-    J_STR,      // we treat everything as a string
+    J_STR,      // every non-obj/arr/vec json value is a string
+    J_VEC,      // a 1-d vector of real numbers
 } JsonType;
 
 typedef struct JsonArray JsonArray;
@@ -133,6 +191,7 @@ typedef struct {
         char* string;
         JsonArray* arr;
         JsonObject* obj;
+        Vec* vec;
     } value;
 } JsonValue;
 
@@ -150,11 +209,6 @@ struct JsonPair {
 struct JsonObject{
     JsonPair* head;
 };
-
-typedef struct {
-    double* data;
-    size_t dim;
-} Vec;
 
 // private api
 
@@ -186,6 +240,9 @@ static void json_value_free_inner(JsonValue* value) {
         case J_OBJ:
             json_object_free(value->value.obj);
             break;
+        case J_VEC:
+            vec_free(value->value.vec);
+            break;
     }
 }
 
@@ -215,8 +272,11 @@ static char* json_value_str(JsonValue* value) {
         case J_ARR:
             return json_array_str(value->value.arr);
             break;
-        default:
+        case J_OBJ:
             return json_object_dumps(value->value.obj);
+            break;
+        default:    // J_VEC
+            return vec_to_str(value->value.vec);
             break;
     }
 }
@@ -314,8 +374,8 @@ JsonValue** json_values_from(JsonType type, void** list, size_t count) {
             case J_OBJ:
                 values[i]->value.obj = (JsonObject*)list[i];
                 break;
-            case J_ARR:
-                fprintf(stderr, "nested arrays not supported yet!");
+            default:
+                fprintf(stderr, "only J_STR or J_OBJ supported");
                 return NULL;
         }
     }
@@ -386,7 +446,17 @@ void json_object_set_obj(JsonObject* obj, const char* k, JsonObject* v) {
     json_object_add_pair(obj, pair);
 }
 
-void json_object_set_vec(JsonObject* obj, const char* k, Vec* v);
+void json_object_set_vec(JsonObject* obj, const char* k, Vec* v) {
+    JsonValue* value = malloc(sizeof(JsonValue));
+    value->type = J_VEC;
+    value->value.vec = v;
+    JsonPair* pair = malloc(sizeof(JsonPair));
+    pair->key = strdup_local(k);
+    pair->value = value;
+    pair->next = NULL;
+
+    json_object_add_pair(obj, pair);
+}
 
 JsonValue* json_object_get(const JsonObject* obj, const char* k);
     JsonType json_object_get_type(const JsonObject* obj, const char* k);
@@ -488,7 +558,35 @@ void test_trivial_json_construction(void) {
     json_object_free(j);
 }
 
-// TODO: add native Vec support
+void test_vec_json_memory(void) {
+    float* xs = malloc(3 * sizeof(float));
+    xs[0] = 3.14159265359f;
+    xs[1] = 2.70f;
+    xs[2] = 1.0f;
+
+    // make JsonObject w/ vec owning a copy of xs
+    // freeing j won't free xs
+    Vec* v = vec_from_copy(xs, 3);
+    JsonObject* j = json_object_init();
+    json_object_set_vec(j, "vec_k", v);
+    char* j_str = json_object_dumps(j);
+    printf("%s", j_str);
+    free(j_str);
+    json_object_free(j);
+
+    // make JsonObject w/ vec pointing at xs
+    // freeing j should also free xs
+    v = vec_from_takes(xs, 3);
+    j = json_object_init();
+    json_object_set_vec(j, "vec_k", v);
+    j_str = json_object_dumps(j);
+    printf("%s", j_str);
+    free(j_str);
+    json_object_free(j);
+}
+
+// TODO: getters
+//       parsing
 int main() {
     /*
     const char FILENAME[] = "test.json";
@@ -501,6 +599,8 @@ int main() {
     */
 
     test_trivial_json_construction();
+    test_vec_json_memory();
+
     return 0;
 }
 
