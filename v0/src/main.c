@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <float.h>
 #include <stdbool.h>
+#include <ctype.h>
 
 // strings
 typedef struct {
@@ -310,7 +311,6 @@ JsonObject* json_object_init() {
     }
     return obj;
 }
-JsonObject* json_object_from(const char* str);  // the parser
 
 /* frees the given object, including all nested objects */
 void json_object_free(JsonObject* obj) {
@@ -421,6 +421,7 @@ void json_object_set_arr(JsonObject* obj, const char* k, JsonType type,
     free(values);
 }
 
+// copies the key and the value into the json object as a pair
 void json_object_set_str(JsonObject* obj, const char* k, const char* v) {
     JsonValue* value = malloc(sizeof(JsonValue));
     value->type = J_STR;
@@ -522,6 +523,168 @@ char* json_object_dumps(JsonObject* obj) {
 }
 
 void json_object_dump(JsonObject* obj, char* filename);
+
+/* context for the json parser */
+typedef struct {
+    const char* data;
+    size_t loc;
+    size_t len;
+} JsonSrc;
+
+typedef enum {
+    SUCCESS = 0,
+    OOM = -1,
+    INVALID_JSON = -2,
+} ParserResultCode;
+
+static bool has_ch(JsonSrc* src) {
+    return src->loc <= src->len;
+}
+
+static char peek_ch(JsonSrc* src) {
+    return has_ch(src) ? src->data[src->loc] : '\0';
+}
+
+static char consume_ch(JsonSrc* src) {
+    return has_ch(src) ? src->data[src->loc++] : '\0';
+}
+
+static void consume_if_eq(JsonSrc* src, char ch) {
+    if (peek_ch(src) == ch) consume_ch(src);
+}
+
+static bool next_isnt(char ch, JsonSrc* src) {
+    return peek_ch(src) != ch;
+}
+
+static void skip_whitespace(JsonSrc* src) {
+    while (isspace(peek_ch(src))) consume_ch(src);
+}
+
+int parse_string_into(JsonSrc* src, char** dst) {
+    // TAKE '"'
+    skip_whitespace(src);
+    if (next_isnt('"', src)) return INVALID_JSON;
+    consume_ch(src);
+
+    size_t start_loc = src->loc;
+    size_t len = 0;
+    bool escaped = false;
+
+    while (has_ch(src)) {
+        char c = consume_ch(src);
+        if (escaped) {
+            escaped = false;
+        } else if (c == '\\') {
+            escaped = true;
+        } else if (c == '"') {
+            char* result = malloc(len + 1);
+            if (result == NULL) return OOM;
+            memcpy(result, src->data + start_loc, len);
+            result[len] = '\0';
+            *dst = result;
+            return SUCCESS;
+        }
+        len++;
+    }
+    return INVALID_JSON;
+}
+
+static int json_value_parse(JsonValue** dst, JsonSrc* src);
+static int json_parse_object(JsonObject* dst, JsonSrc* src) {
+    // TAKE '{'
+    skip_whitespace(src);
+    if (next_isnt('{', src)) return INVALID_JSON;
+    consume_ch(src);
+
+    skip_whitespace(src);
+    while (next_isnt('}', src)) {
+        // parse key
+        char* key;
+        int res = parse_string_into(src, &key);
+        if (res != SUCCESS) return res;
+        
+        // TAKE ':'
+        skip_whitespace(src);
+        if (next_isnt(':', src)) return INVALID_JSON;
+        consume_ch(src);
+
+        // parse value
+        JsonValue* value;
+        res = json_value_parse(&value, src);
+        if (res != SUCCESS) return res;
+
+        // add kv pair
+        JsonPair* pair = malloc(sizeof(JsonPair));
+        pair->value = value;
+        pair->key = key;
+        pair->next = NULL;
+        json_object_add_pair(dst, pair);
+
+        // consume till next key
+        skip_whitespace(src);
+        consume_if_eq(src, ',');
+        skip_whitespace(src);
+    }
+    return SUCCESS;
+}
+
+static int parse_jv_str(JsonValue* dst, JsonSrc* src) {
+    char* s;
+    int result = parse_string_into(src, &s);
+    if (result != SUCCESS) return INVALID_JSON;
+
+    dst->type = J_STR;
+    dst->value.string = s;
+    return SUCCESS;
+}
+
+/* just surround w doublequotes and parse as str */
+static int parse_jv_literal(JsonValue* dst, JsonSrc* src) {
+    // this is bad but whatever
+    skip_whitespace(src);
+    size_t start_loc = src->loc;
+    size_t len = 0;
+    while (has_ch(src)) {
+        char c = consume_ch(src);
+        if (!isalnum(c) && c != '.') {
+            char* result = malloc(len + 1);
+            if (result == NULL) return OOM;
+            memcpy(result, src->data + start_loc, len);
+            result[len] = '\0';
+            dst->type = J_STR;
+            dst->value.string = result;
+            return SUCCESS;
+        }
+        len++;
+    }
+    return INVALID_JSON;
+}
+
+static int json_value_parse(JsonValue** dst, JsonSrc* src) {
+    skip_whitespace(src);
+    if (!has_ch(src)) return INVALID_JSON;
+
+    JsonValue* value = malloc(sizeof(JsonValue));
+    int result;
+    switch(peek_ch(src)) {
+        case '"':   
+            result = parse_jv_str(value, src);
+            break;
+        default:
+            result = parse_jv_literal(value, src);
+            break;
+    }
+    *dst = value;
+    return result;
+}
+
+// parse a char* `src` into a JsonObject* `obj` if possible
+int json_parse(JsonObject* obj, const char* str) {
+    JsonSrc src = { str, 0, strlen(str) };
+    return json_parse_object(obj, &src);
+}
+
 
 char* read_file_to_str(const char* filename) {
     FILE* file = fopen(filename, "r");
@@ -639,7 +802,7 @@ void test_json_vec(void) {
 }
 
 
-// TODO: parsing
+// TODO: parsing (just arrays and make sure recursion plugs for objs)
 //       parse vec as tensor w/ strides given by shape vec
 int main() {
     /*
@@ -653,9 +816,30 @@ int main() {
     */
 
     // test_json_build();
-    test_json_vec();
-
+    // test_json_vec();
+   
+    /*
+    char* strdata = "\"abc\"";
+    char* dst;
+    JsonSrc src = {strdata, 0, strlen(strdata)};
+    
+    int result = parse_string_into(&src, &dst);
+    printf("parse_string_into returned: %d\n", result);
+    if (result == SUCCESS) {
+        printf("%s", dst);
+        free(dst);
+    }
     return 0;
+    */
+    char* str = "{\"foo\" : \"bar\", \"a\": 12.3}";
+    JsonObject* j = json_object_init();
+    json_parse(j, str);
+
+    char* js = json_object_dumps(j);
+    printf("%s\n", js);
+
+    json_object_free(j);
+    free(js);
 }
 
 
