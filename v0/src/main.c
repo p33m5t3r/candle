@@ -187,6 +187,7 @@ typedef struct JsonArray JsonArray;
 typedef struct JsonObject JsonObject;
 typedef struct JsonPair JsonPair;
 
+// 16 bytes
 typedef struct {
     JsonType type;
     union {
@@ -197,26 +198,44 @@ typedef struct {
     } value;
 } JsonValue;
 
-struct JsonArray{
+// 24 bytes
+struct JsonArray {
     JsonValue* values;
     size_t size;
+    size_t capacity;
 };
 
+// 24 bytes
 struct JsonPair {
     char* key;
     JsonValue* value;
     JsonPair* next;
 };
 
-struct JsonObject{
+// 8 bytes
+struct JsonObject {
     JsonPair* head;
 };
 
-// private api
 
 void json_object_free(JsonObject* obj);
 static void json_value_free(JsonValue* value);
 static void json_value_free_inner(JsonValue* value);
+static char* json_value_str(JsonValue* value);
+
+/* initializes an empty JsonArray with given `initial_capacity` */
+JsonArray* json_array_init(size_t initial_capacity) {
+    JsonArray* arr = malloc(sizeof(JsonArray));
+    if (arr == NULL) return NULL;
+    arr->values = malloc(initial_capacity * sizeof(JsonValue));
+    if (arr->values == NULL) {
+        free(arr);
+        return NULL;
+    }
+    arr->capacity = initial_capacity;
+    arr->size = 0;
+    return arr;
+}
 
 static void json_array_free(JsonArray* arr) {
     if (arr == NULL) return;
@@ -226,6 +245,47 @@ static void json_array_free(JsonArray* arr) {
 
     free(arr->values);
     free(arr);
+}
+
+static bool json_array_resize(JsonArray* arr, size_t new_capacity) {
+    JsonValue* new_values = realloc(arr->values, new_capacity * sizeof(JsonValue));
+    if (new_values == NULL) return false;
+    arr->values = new_values;
+    arr->capacity = new_capacity;
+    return true;
+}
+
+static bool json_array_resize_if_needed(JsonArray* arr, size_t new_size) {
+    if (arr->capacity > new_size) return true;  // ok, nothing to do
+    size_t new_capacity = arr->capacity;
+    while (new_capacity <= new_size) new_capacity *= 2;
+    return json_array_resize(arr, new_capacity);
+}
+
+static bool json_array_append(JsonArray* arr, JsonValue* value) {
+    json_array_resize_if_needed(arr, arr->size + 1);
+    arr->values[arr->size++] = *value;
+    return true;
+}
+
+static char* json_array_str(JsonArray* arr) {
+    String* s = string_from("[");
+    for (size_t i = 0; i < arr->size; i++) {
+        if (i > 0) string_append(s, ", ");
+        if (arr->values[i].type == J_STR) {
+            string_append(s, "\"");
+            string_append(s, arr->values[i].value.string);
+            string_append(s, "\"");
+        } else {
+            char* value_str = json_value_str(&arr->values[i]);
+            string_append(s, value_str);
+            free(value_str);
+        }
+    }
+    string_append(s, "]");
+    char* result = string_to_chars(s);
+    string_free(s);
+    return result;
 }
 
 /* frees the data in `value` but not `value` itself */
@@ -263,7 +323,6 @@ static void json_pair_free(JsonPair* head) {
     free(head);
 }
 
-static char* json_array_str(JsonArray* arr);
 static char* json_object_dumps(JsonObject* obj);
 static char* json_value_str(JsonValue* value) {
     if (value == NULL) return strdup_local("NULL");
@@ -281,26 +340,6 @@ static char* json_value_str(JsonValue* value) {
             return vec_to_str(value->value.vec);
             break;
     }
-}
-
-static char* json_array_str(JsonArray* arr) {
-    String* s = string_from("[");
-    for (size_t i = 0; i < arr->size; i++) {
-        if (i > 0) string_append(s, ", ");
-        if (arr->values[i].type == J_STR) {
-            string_append(s, "\"");
-            string_append(s, arr->values[i].value.string);
-            string_append(s, "\"");
-        } else {
-            char* value_str = json_value_str(&arr->values[i]);
-            string_append(s, value_str);
-            free(value_str);
-        }
-    }
-    string_append(s, "]");
-    char* result = string_to_chars(s);
-    string_free(s);
-    return result;
 }
 
 // public api
@@ -335,18 +374,7 @@ void json_object_add_pair(JsonObject* obj, JsonPair* pair) {
     pair->next = NULL;
 }
 
-/* initializes an empty JsonArray with space for `size` elements */
-JsonArray* json_array_init(size_t size) {
-    JsonArray* arr = malloc(sizeof(JsonArray));
-    if (arr == NULL) return NULL;
-    arr->values = malloc(size * sizeof(JsonValue));
-    if (arr->values == NULL) {
-        free(arr);
-        return NULL;
-    }
-    arr->size = size;
-    return arr;
-}
+
 
 JsonValue** json_values_from(JsonType type, void** list, size_t count) {
     JsonValue** values = malloc(count * sizeof(JsonValue*));
@@ -394,7 +422,8 @@ void json_object_set_arr(JsonObject* obj, const char* k, JsonType type,
         return;
     }
     for (size_t i = 0; i < n; i++) {
-        arr->values[i] = *values[i];
+        // arr->values[i] = *values[i];
+        json_array_append(arr, values[i]);
         free(values[i]);    // take ownership
     }
     
@@ -561,6 +590,14 @@ static void skip_whitespace(JsonSrc* src) {
     while (isspace(peek_ch(src))) consume_ch(src);
 }
 
+static size_t count_ch_until(JsonSrc* src, char to_count, char stop) {
+    size_t count = 0, loc = src->loc;
+    char cur_ch;
+    while (loc <= src->len && (cur_ch = *(src->data + loc++)) != stop)
+        count += (cur_ch == to_count) ? 1 : 0;
+    return count;
+}
+
 int parse_string_into(JsonSrc* src, char** dst) {
     // TAKE '"'
     skip_whitespace(src);
@@ -590,7 +627,8 @@ int parse_string_into(JsonSrc* src, char** dst) {
     return INVALID_JSON;
 }
 
-static int json_value_parse(JsonValue** dst, JsonSrc* src);
+static int json_value_parse(JsonValue* dst, JsonSrc* src);
+
 static int json_parse_object(JsonObject* dst, JsonSrc* src) {
     // TAKE '{'
     skip_whitespace(src);
@@ -610,8 +648,8 @@ static int json_parse_object(JsonObject* dst, JsonSrc* src) {
         consume_ch(src);
 
         // parse value
-        JsonValue* value;
-        res = json_value_parse(&value, src);
+        JsonValue* value = malloc(sizeof(JsonValue));
+        res = json_value_parse(value, src);
         if (res != SUCCESS) return res;
 
         // add kv pair
@@ -639,9 +677,8 @@ static int parse_jv_str(JsonValue* dst, JsonSrc* src) {
     return SUCCESS;
 }
 
-/* just surround w doublequotes and parse as str */
 static int parse_jv_literal(JsonValue* dst, JsonSrc* src) {
-    // this is bad but whatever
+    // this is not great but whatever
     skip_whitespace(src);
     size_t start_loc = src->loc;
     size_t len = 0;
@@ -661,21 +698,89 @@ static int parse_jv_literal(JsonValue* dst, JsonSrc* src) {
     return INVALID_JSON;
 }
 
-static int json_value_parse(JsonValue** dst, JsonSrc* src) {
+static int parse_jv_vec(JsonValue* dst, JsonSrc* src) {
+    // NOTE: assumes src->loc points at a numeric digit
+    // ... ie whitespace has already been cleared by caller
+    
+    size_t vec_len = count_ch_until(src, ',', ']') + 1;
+    Vec* vec = vec_init(vec_len);
+    if (vec == NULL) return OOM;
+
+    size_t index = 0;
+    while (next_isnt(']', src) && index < vec_len) {
+        consume_if_eq(src, ',');
+        skip_whitespace(src);
+        
+        const char* start = src->data + src->loc;
+        char* end;
+        float value = strtof(start, &end);
+        if (start == end) {
+            vec_free(vec);
+            return INVALID_JSON;
+        }
+        vec->data[index++] = value;
+        src->loc += (end - start);
+
+        skip_whitespace(src);
+    }
+
+    consume_if_eq(src, ']');
+    dst->type = J_VEC;
+    dst->value.vec = vec;
+    return SUCCESS;
+}
+
+static int parse_jv_arr(JsonValue* dst, JsonSrc* src) {
+    // TAKE '['
+    skip_whitespace(src);
+    if (next_isnt('[', src)) return INVALID_JSON;
+    consume_ch(src);
+   
+    // if it's a flat array and first digit is numeric:
+    // ... try parse as vec
+    skip_whitespace(src);
+    if (isdigit(peek_ch(src))) return parse_jv_vec(dst, src);
+
+    // otherwise, parse into an array
+    JsonArray* arr = json_array_init(16);
+    while (next_isnt(']', src)) {
+        // kill off preceeding comma and whitespace
+        consume_if_eq(src, ',');
+        skip_whitespace(src);
+
+        // parse the immediate value and append
+        JsonValue* value = malloc(sizeof(JsonValue));
+        int res = json_value_parse(value, src);
+        if (res != SUCCESS) return INVALID_JSON;
+        json_array_append(arr, value);
+        free(value); // array takes ownership
+
+        skip_whitespace(src);
+    }
+    consume_if_eq(src, ']');
+    dst->type = J_ARR;
+    dst->value.arr = arr;
+    
+    return SUCCESS;
+}
+
+/* dst should be allocated*/
+static int json_value_parse(JsonValue* dst, JsonSrc* src) {
     skip_whitespace(src);
     if (!has_ch(src)) return INVALID_JSON;
 
-    JsonValue* value = malloc(sizeof(JsonValue));
     int result;
     switch(peek_ch(src)) {
         case '"':   
-            result = parse_jv_str(value, src);
+            result = parse_jv_str(dst, src);
+            break;
+        case '[':   // parses as Vec on non-nested numeric data
+            result = parse_jv_arr(dst, src);
             break;
         default:
-            result = parse_jv_literal(value, src);
+            result = parse_jv_literal(dst, src);
             break;
     }
-    *dst = value;
     return result;
 }
 
@@ -780,7 +885,6 @@ void test_json_vec(void) {
     j_str = json_object_dumps(j);
     free(j_str);
     json_object_free(j);
-    printf("json vec construction OK\n");
     }
 
     float* xs = malloc(3 * sizeof(float));
@@ -794,11 +898,26 @@ void test_json_vec(void) {
     json_object_set_vec(j, "vec", v);
     json_object_get_vec(j, "vec", &out);
     char* s = vec_to_str(out);
-    printf("%s", s);
+    // printf("%s", s);
     free(s);
 
     json_object_free(j);
     free(xs);
+    printf("json vec construction OK\n");
+}
+
+void test_json_parse(void) {
+    char* str = "{\"foo\" : \"bar\", \"r\": 12.3,\
+                  \"v\" : [ 0.1,2, 3.14, 4, 5 ] }";
+    JsonObject* j = json_object_init();
+    json_parse(j, str);
+
+    char* js = json_object_dumps(j);
+    printf("%s\n", js);
+
+    json_object_free(j);
+    free(js);
+    printf("json parsing OK\n");
 }
 
 
@@ -818,28 +937,22 @@ int main() {
     // test_json_build();
     // test_json_vec();
    
+    test_json_build();
+    test_json_vec();
+    test_json_parse();
+   
     /*
-    char* strdata = "\"abc\"";
-    char* dst;
-    JsonSrc src = {strdata, 0, strlen(strdata)};
-    
-    int result = parse_string_into(&src, &dst);
-    printf("parse_string_into returned: %d\n", result);
-    if (result == SUCCESS) {
-        printf("%s", dst);
-        free(dst);
-    }
-    return 0;
+    char* s = "12.4, 123]";
+    JsonSrc src = {s, 0, strlen(s)};
+    size_t x = count_ch_until(&src, ',', ']');
+    printf("%d\n\n\n", (int)x);
+
+    const char* ss = "12.12341, 123]";
+    char* end;
+    float value = strtof(ss, &end);
+    printf("%f\n", value);
+    printf("%s\n", end);
     */
-    char* str = "{\"foo\" : \"bar\", \"a\": 12.3}";
-    JsonObject* j = json_object_init();
-    json_parse(j, str);
-
-    char* js = json_object_dumps(j);
-    printf("%s\n", js);
-
-    json_object_free(j);
-    free(js);
 }
 
 
