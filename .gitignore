@@ -1,2 +1,5 @@
 *.json
 *.o
+.cache/
+.clangd
+bin/*

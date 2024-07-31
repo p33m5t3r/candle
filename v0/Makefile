@@ -5,14 +5,17 @@ CC 		= gcc
 CFLAGS_DEV 	= -Wall -Wextra -Wpedantic -Werror -O0 -g -std=c11
 CFLAGS_RELEASE 	= -O3 -march=native -Wall -Wextra -std=c11
 
-TARGET 	= main
-SRC_DIR = ./src
-OBJ_DIR = ./obj
-BIN_DIR = ./bin
-OUT 	= $(BIN_DIR)/$(TARGET)
-SRCS 	= $(wildcard $(SRC_DIR)/*.c)
-HEADERS = $(wildcard $(SRC_DIR)/*.h)
-OBJS 	= $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+TARGET 	 = main
+SRC_DIR  = ./src
+OBJ_DIR  = ./obj
+BIN_DIR  = ./bin
+TEST_DIR = ./tests
+OUT 	 = $(BIN_DIR)/$(TARGET)
+SRCS 	 = $(wildcard $(SRC_DIR)/*.c)
+HEADERS  = $(wildcard $(SRC_DIR)/*.h)
+OBJS 	 = $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+TEST_SRC = $(TEST_DIR)/test.c
+TEST_OUT = $(BIN_DIR)/test
 
 all: dev
 
@@ -31,6 +34,13 @@ $(OUT): $(OBJS)
 # build objects
 $(OBJ_DIR)/%.o : $(SRC_DIR)/%.c $(HEADERS)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# test target
+test: CFLAGS = $(CFLAGS_DEV)
+test: $(OBJS)
+	$(CC) $(CFLAGS) -o $(TEST_OUT) $(TEST_SRC) $(filter-out $(OBJ_DIR)/main.o, $(OBJS))
+	$(TEST_OUT)
+	valgrind --leak-check=full $(TEST_OUT)
 
 clean:
 	rm -rf $(OBJ_DIR)/*.o $(BIN_DIR)/*

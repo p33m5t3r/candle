@@ -22,7 +22,7 @@ Vec* vec_from_copy(const float* data, size_t dim) {
     memcpy(v->data, data, dim * sizeof(float)); 
     return v;
 }
-/* takes ownership of data, caller owns returned vec */
+/* references data, caller owns returned vec */
 Vec* vec_from_takes(float* data, size_t dim) {
     Vec* vec = malloc(sizeof(Vec));
     if (vec == NULL) return NULL;
